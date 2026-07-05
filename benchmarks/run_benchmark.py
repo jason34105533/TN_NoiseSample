@@ -7,7 +7,7 @@ import statistics
 from typing import Any, Dict, List, Optional
 
 from .circuit_generator import generate_ensemble
-from .timing import Timer
+from .timing import Timer, gpu_device_info
 from tn_noise_sim.simulators import (
     TraditionalTrajectorySimulator,
     UnoptimizedPTSBESimulator,
@@ -73,9 +73,14 @@ def run_benchmark(
     final_batch_size = min(final_batch_size, n)
     batch_size = min(batch_size, n)
 
+    gpu_info = gpu_device_info() if use_gpu else None
+
     print(f"\nBenchmarking n={n}, g={g}, instances={num_instances}, shots={num_shots}")
     print(f"  batch_size={batch_size}, final_batch_size={final_batch_size}, "
           f"hypersamples={num_hypersamples}, E={num_error_sets}")
+    if gpu_info:
+        print(f"  GPU: {gpu_info['gpu_device_name']} "
+              f"({gpu_info['gpu_memory_total_bytes'] / 2**30:.1f} GiB)")
 
     circuits = generate_ensemble(n, g, num_instances)
     all_results: List[Dict[str, Any]] = []
@@ -130,12 +135,14 @@ def run_benchmark(
             "num_bitstrings_traditional": len(r1),
             "num_bitstrings_unoptimized": len(r2),
             "num_bitstrings_optimized": len(r3),
+            "gpu_device_name": gpu_info["gpu_device_name"] if gpu_info else None,
+            "gpu_memory_total_bytes": gpu_info["gpu_memory_total_bytes"] if gpu_info else None,
         }
         all_results.append(record)
         print(f"  [{inst_id+1}/{num_instances}] speedup optimized/traditional: "
               f"{record['speedup_optimized_vs_traditional']:.1f}x")
 
-    _print_summary(all_results, n, g)
+    _print_summary(all_results, n, g, gpu_info)
 
     if output_path:
         _write_json(all_results, output_path)
@@ -149,7 +156,9 @@ def _valid_speedups(results: List[Dict], key: str) -> List[float]:
     return [r[key] for r in results if math.isfinite(r[key])]
 
 
-def _print_summary(results: List[Dict], n: int, g: int) -> None:
+def _print_summary(
+    results: List[Dict], n: int, g: int, gpu_info: Optional[Dict[str, Any]] = None
+) -> None:
     speedups_opt = _valid_speedups(results, "speedup_optimized_vs_traditional")
     speedups_unopt = _valid_speedups(results, "speedup_unoptimized_vs_traditional")
 
@@ -168,6 +177,8 @@ def _print_summary(results: List[Dict], n: int, g: int) -> None:
     s_unopt = _stats(speedups_unopt)
 
     print("\n" + "=" * 70)
+    if gpu_info:
+        print(f"GPU: {gpu_info['gpu_device_name']}")
     print(f"{'n':>4} {'g':>5} {'simulator':>20} {'mean_speedup':>14} {'std':>10}")
     print("-" * 70)
     print(f"{n:>4} {g:>5} {'unoptimized_ptsbe':>20} {s_unopt['mean']:>14.2f} "

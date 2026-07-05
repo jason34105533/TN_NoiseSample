@@ -6,6 +6,8 @@ from tn_noise_sim.tensor_network import TensorNetworkBuilder, TNNetwork
 from tn_noise_sim.noise_model import NoiseModel
 from tn_noise_sim.error_sampling import ErrorSampler, _I, _X
 
+from tests.conftest import requires_qiskit
+
 
 def _random_unitary(d: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
@@ -153,3 +155,89 @@ def test_two_qubit_gate_tensor_shape():
     net = TensorNetworkBuilder.build(circuit)
     gate = next(t for t in net.tensors if t.name == "gate_0")
     assert gate.shape == (2, 2, 2, 2), f"Expected (2,2,2,2), got {gate.shape}"
+
+
+# ── 3.6 Qiskit IR integration (from_qiskit_circuit) ───────────────────────────
+# This is the one code path that actually depends on the installed Qiskit
+# version's circuit.data/find_bit/Operator surface (see design.md D2). Neither
+# the rest of this suite nor the benchmark circuit generator exercises it, so
+# it needs direct coverage to catch Qiskit version drift.
+
+@requires_qiskit
+def test_from_qiskit_circuit_tensor_and_gate_counts():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.rz(0.3, 2)
+    qc.cx(1, 2)
+
+    net = TensorNetworkBuilder.from_qiskit_circuit(qc)
+    assert net.n_qubits == 3
+    assert net.n_gates == 4
+    # 3 ket tensors + 4 gate tensors
+    assert len(net.tensors) == 7
+
+
+@requires_qiskit
+def test_from_qiskit_circuit_gate_shapes_match_arity():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    net = TensorNetworkBuilder.from_qiskit_circuit(qc)
+    gate_0 = next(t for t in net.tensors if t.name == "gate_0")
+    gate_1 = next(t for t in net.tensors if t.name == "gate_1")
+    assert gate_0.shape == (2, 2)
+    assert gate_1.shape == (2, 2, 2, 2)
+
+
+@requires_qiskit
+def test_from_qiskit_circuit_matches_manual_dict_build():
+    """A circuit built via Qiskit and the equivalent hand-built dict circuit
+    should produce numerically identical tensor networks."""
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Operator
+
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    net_from_qiskit = TensorNetworkBuilder.from_qiskit_circuit(qc)
+
+    manual_circuit = {
+        "n_qubits": 2,
+        "gates": [
+            {"qubits": (0,), "unitary": Operator(qc.data[0].operation).data},
+            {"qubits": (0, 1), "unitary": Operator(qc.data[1].operation).data},
+        ],
+    }
+    net_manual = TensorNetworkBuilder.build(manual_circuit)
+
+    assert net_from_qiskit.topology_hash() == net_manual.topology_hash()
+    for t1, t2 in zip(net_from_qiskit.tensors, net_manual.tensors):
+        assert np.allclose(t1.data, t2.data)
+
+
+@requires_qiskit
+def test_from_qiskit_circuit_with_fused_error_set():
+    """UPV fuse mode must work identically whether the noiseless network came
+    from a Qiskit circuit or a manual dict circuit."""
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    error_set = {0: _X.copy()}
+    noiseless = TensorNetworkBuilder.from_qiskit_circuit(qc)
+    fused = TensorNetworkBuilder.from_qiskit_circuit(qc, error_set=error_set, mode="fuse")
+
+    assert len(fused.tensors) == len(noiseless.tensors)
+    assert noiseless.topology_hash() == fused.topology_hash()
+    gate_noiseless = next(t for t in noiseless.tensors if t.name == "gate_0")
+    gate_fused = next(t for t in fused.tensors if t.name == "gate_0")
+    assert not np.allclose(gate_noiseless.data, gate_fused.data)

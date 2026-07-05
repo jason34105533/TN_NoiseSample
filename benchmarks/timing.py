@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import Dict, Optional
 
 try:
     import cupy as cp
@@ -11,6 +11,23 @@ try:
 except ImportError:
     cp = None
     HAS_CUPY = False
+
+
+def gpu_device_info() -> Optional[Dict[str, object]]:
+    """Return {"gpu_device_name": str, "gpu_memory_total_bytes": int} for the
+    active CUDA device, or None if no GPU/cupy is available."""
+    if not HAS_CUPY:
+        return None
+    try:
+        device_id = cp.cuda.Device().id
+        props = cp.cuda.runtime.getDeviceProperties(device_id)
+        name = props["name"]
+        if isinstance(name, bytes):
+            name = name.decode()
+        _, total_bytes = cp.cuda.runtime.memGetInfo()
+        return {"gpu_device_name": name, "gpu_memory_total_bytes": int(total_bytes)}
+    except Exception:
+        return None
 
 
 class Timer:

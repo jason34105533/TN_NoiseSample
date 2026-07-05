@@ -1,4 +1,6 @@
 """Integration tests for all three simulator phases."""
+from collections import Counter
+
 import numpy as np
 import pytest
 from unittest.mock import patch
@@ -202,3 +204,45 @@ class TestOptimizedPTSBESimulator:
         for bs in ["00", "01", "10", "11"]:
             freq = counts.get(bs, 0) / total
             assert 0.10 < freq < 0.40, f"Born rule violation: P({bs})={freq:.3f}"
+
+
+# ── Cross-simulator distributional consistency ────────────────────────────────
+# Regression coverage for a real bug found during the V100 validation pass:
+# ErrorSampler._sample_proportional() used to re-weight shot counts by
+# _error_set_weight() on top of error sets already drawn i.i.d. from their true
+# probability, double-applying the weighting and skewing proportional-mode
+# PTSBE's bitstring distribution away from the traditional trajectory
+# distribution. The zero-noise `test_proportional_born_rule` above can't catch
+# this (all weights are identically 1 when p=0), so this uses nonzero noise.
+
+def test_proportional_matches_traditional_distribution():
+    """Phase 3 (proportional NBS) must reproduce Phase 1's (traditional
+    trajectory) bitstring distribution on the same circuit, per the paper's
+    requirement that proportional PTSBE preserves quantum statistics."""
+    from benchmarks.circuit_generator import generate_circuit
+
+    circuit_data = generate_circuit(n=5, g=12, seed=7)
+    circuit = {k: v for k, v in circuit_data.items() if k != "noise_model"}
+    noise_model = circuit_data["noise_model"]
+
+    num_shots = 20000
+    trad = TraditionalTrajectorySimulator(batch_size=5, rng_seed=1)
+    r_trad = trad.sample(circuit, noise_model, num_shots=num_shots)
+
+    opt = OptimizedPTSBESimulator(
+        batch_size=3, final_batch_size=5,
+        num_hypersamples=1, num_error_sets=200, rng_seed=2,
+    )
+    r_opt = opt.sample(circuit, noise_model, num_shots=num_shots, mode="proportional")
+
+    c_trad = Counter(bs for bs, _ in r_trad)
+    c_opt = Counter(bs for bs, _ in r_opt)
+    n_trad, n_opt = sum(c_trad.values()), sum(c_opt.values())
+    all_keys = set(c_trad) | set(c_opt)
+    tvd = sum(
+        abs(c_trad.get(k, 0) / n_trad - c_opt.get(k, 0) / n_opt) for k in all_keys
+    ) / 2
+
+    # Expected sampling-noise-only TVD at this shot count/outcome count is
+    # ~0.02-0.04; the pre-fix bug produced ~0.21, an order of magnitude higher.
+    assert tvd < 0.08, f"Proportional PTSBE diverges from traditional stats: TVD={tvd:.3f}"

@@ -42,11 +42,6 @@ def _sample_depolarizing_2q(spec: GateNoiseSpec, rng: np.random.Generator) -> np
     return np.eye(4, dtype=complex)
 
 
-def _gate_weight(spec: GateNoiseSpec) -> float:
-    """Return the probability that this gate is in error (for proportional sampling weight)."""
-    return spec.probability
-
-
 # Type alias: an error set is {gate_idx: error_operator_ndarray}
 ErrorSet = Dict[int, np.ndarray]
 
@@ -136,51 +131,21 @@ class ErrorSampler:
             error_set[gate_idx] = op
         return error_set
 
-    def _error_set_weight(self, error_set: ErrorSet) -> float:
-        """
-        Compute the sampling weight of an error set as the product of per-gate
-        probabilities (identity gates contribute 1 - p, error gates contribute p/k).
-        """
-        weight = 1.0
-        for gate_idx in range(self.num_gates):
-            spec = self.noise_model.get(gate_idx)
-            if spec is None:
-                continue
-            op = error_set.get(gate_idx)
-            if op is None:
-                continue
-            if spec.error_type == ErrorType.PAULI:
-                if np.allclose(op, _I):
-                    weight *= 1.0 - spec.probability
-                else:
-                    weight *= spec.probability / 3.0
-            elif spec.error_type == ErrorType.DEPOLARIZING:
-                if np.allclose(op, np.eye(4)):
-                    weight *= 1.0 - spec.probability
-                else:
-                    weight *= spec.probability / 15.0
-        return weight
-
     def _sample_proportional(self, num_error_sets: int, total_shots: int):
+        # Each error set is already drawn i.i.d. from its true probability
+        # P(K_i) via _draw_one_error_set(). Re-weighting shot counts by
+        # _error_set_weight() on top of that double-applies the probability
+        # (the classic self-normalized-importance-sampling bug), skewing the
+        # aggregate bitstring distribution away from true trajectory
+        # statistics. Since the draws already encode P(K_i), proportional
+        # sampling requires only uniform shot allocation across them.
         sets = [self._draw_one_error_set() for _ in range(num_error_sets)]
-        weights = np.array([self._error_set_weight(s) for s in sets], dtype=float)
-        weight_sum = weights.sum()
-        if weight_sum == 0:
-            weights = np.ones(num_error_sets, dtype=float) / num_error_sets
-        else:
-            weights /= weight_sum
-
-        # Assign shot counts proportional to weights, preserving total
-        raw = weights * total_shots
-        counts = np.floor(raw).astype(int)
-        remainder = total_shots - counts.sum()
-        # Distribute remaining shots to sets with largest fractional parts
-        fracs = raw - counts
-        top_indices = np.argsort(-fracs)[:remainder]
-        counts[top_indices] += 1
+        base = total_shots // num_error_sets
+        extra = total_shots % num_error_sets
+        counts = [base + (1 if i < extra else 0) for i in range(num_error_sets)]
 
         self._error_sets = sets
-        self._shot_counts = counts.tolist()
+        self._shot_counts = counts
 
     def _sample_non_proportional(self, num_error_sets: int, total_shots: int):
         sets = [self._draw_one_error_set() for _ in range(num_error_sets)]
