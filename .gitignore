@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+*.so
+*.dylib
+.DS_Store
+results.json
+*.json
+!pyproject.toml
