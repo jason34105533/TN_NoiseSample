@@ -132,3 +132,36 @@ def test_run_benchmark_proportional_mode_plumbed_to_simulator():
     assert results[0]["success"] is True
     # proportional mode returns exactly num_shots bitstrings
     assert results[0]["num_bitstrings_optimized"] == 4
+
+
+# ── Decoupled baseline shot count (proportional-sweep fix) ──────────────────
+
+def test_run_benchmark_baseline_num_shots_defaults_to_num_shots():
+    from benchmarks.run_benchmark import run_benchmark
+
+    results = run_benchmark(
+        n=3, g=3, num_instances=1, num_shots=6, num_error_sets=2,
+        batch_size=2, final_batch_size=3, fast=True, use_gpu=False,
+        mode="proportional",
+    )
+    assert results[0]["baseline_num_shots"] == 6
+    assert results[0]["num_bitstrings_traditional"] == 6
+    assert results[0]["num_bitstrings_unoptimized"] == 6
+    assert results[0]["num_bitstrings_optimized"] == 6
+
+
+def test_run_benchmark_baseline_num_shots_decoupled_from_num_shots():
+    from benchmarks.run_benchmark import run_benchmark
+
+    results = run_benchmark(
+        n=3, g=3, num_instances=1, num_shots=8, num_error_sets=2,
+        batch_size=2, final_batch_size=3, fast=True, use_gpu=False,
+        mode="proportional", baseline_num_shots=3,
+    )
+    assert results[0]["num_shots_requested"] == 8
+    assert results[0]["baseline_num_shots"] == 3
+    # Traditional/Unoptimized get the small baseline count...
+    assert results[0]["num_bitstrings_traditional"] == 3
+    assert results[0]["num_bitstrings_unoptimized"] == 3
+    # ...while Optimized PTSBE still gets the full swept num_shots (mi)
+    assert results[0]["num_bitstrings_optimized"] == 8

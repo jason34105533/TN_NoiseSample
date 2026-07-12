@@ -107,6 +107,7 @@ def run_benchmark(
     fast: bool = False,
     use_gpu: bool = True,
     timeout_s: Optional[float] = 600.0,
+    baseline_num_shots: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Benchmark all three simulator phases on an ensemble of random circuits.
@@ -116,7 +117,8 @@ def run_benchmark(
     n: number of qubits
     g: number of gates
     num_instances: circuits to benchmark
-    num_shots: shots per circuit instance
+    num_shots: shots requested from OptimizedPTSBESimulator (== the paper's
+        `mi` for proportional-mode sweeps, which may be swept up to 10,000)
     num_error_sets: E for PTSBE simulators
     batch_size: non-final batch qubit count (paper default 10)
     final_batch_size: final batch qubit count, capped at n (paper default 28)
@@ -129,6 +131,15 @@ def run_benchmark(
         exceed it (or raise) are recorded with success=False and excluded
         from geometric-mean aggregation, matching the paper's >80%/<80%
         success-rate convention (Sec. IV-D)
+    baseline_num_shots: shots requested from Traditional/Unoptimized PTSBE,
+        independent of num_shots. Throughput is a per-shot rate, so the
+        baseline only needs enough shots for a stable rate estimate; it
+        does not need to match num_shots/mi. Defaults to num_shots when
+        unset, preserving prior behavior for non-proportional sweeps.
+        Set this explicitly (small, e.g. 20-50) for proportional-mode
+        sweeps where num_shots/mi is swept up to 10,000 — Traditional's
+        per-shot GPU network rebuild (~1-2s each) makes matching mi
+        directly impractical.
 
     Returns
     -------
@@ -139,10 +150,12 @@ def run_benchmark(
     final_batch_size = min(final_batch_size, n)
     batch_size = min(batch_size, n)
     trad_batch_size = min(PAPER_TRADITIONAL_BATCH_SIZE, n)
+    baseline_shots = baseline_num_shots if baseline_num_shots is not None else num_shots
 
     gpu_info = gpu_device_info() if use_gpu else None
 
-    print(f"\nBenchmarking n={n}, g={g}, instances={num_instances}, shots={num_shots}, mode={mode}")
+    print(f"\nBenchmarking n={n}, g={g}, instances={num_instances}, shots={num_shots} "
+          f"(baseline_shots={baseline_shots}), mode={mode}")
     print(f"  batch_size={batch_size}, final_batch_size={final_batch_size}, "
           f"hypersamples={num_hypersamples}, E={num_error_sets}, use_gpu={use_gpu}")
     if gpu_info:
@@ -158,7 +171,8 @@ def run_benchmark(
 
         record: Dict[str, Any] = {
             "n": n, "g": g, "instance_id": inst_id, "mode": mode, "success": True,
-            "num_shots_requested": num_shots, "final_batch_size": final_batch_size,
+            "num_shots_requested": num_shots, "baseline_num_shots": baseline_shots,
+            "final_batch_size": final_batch_size,
             "gpu_device_name": gpu_info["gpu_device_name"] if gpu_info else None,
             "gpu_memory_total_bytes": gpu_info["gpu_memory_total_bytes"] if gpu_info else None,
         }
@@ -167,7 +181,7 @@ def run_benchmark(
             ContractionPathCache.clear()
             sim1 = TraditionalTrajectorySimulator(batch_size=trad_batch_size, rng_seed=inst_id, use_gpu=use_gpu)
             r1, t1 = _run_with_timeout(
-                lambda: _time_simulator(sim1, circuit, noise_model, num_shots, use_gpu), timeout_s
+                lambda: _time_simulator(sim1, circuit, noise_model, baseline_shots, use_gpu), timeout_s
             )
             tp1 = _throughput(len(r1), t1)
 
@@ -176,7 +190,7 @@ def run_benchmark(
                 batch_size=batch_size, num_error_sets=num_error_sets, rng_seed=inst_id, use_gpu=use_gpu
             )
             r2, t2 = _run_with_timeout(
-                lambda: _time_simulator(sim2, circuit, noise_model, num_shots, use_gpu), timeout_s
+                lambda: _time_simulator(sim2, circuit, noise_model, baseline_shots, use_gpu), timeout_s
             )
             tp2 = _throughput(len(r2), t2)
 

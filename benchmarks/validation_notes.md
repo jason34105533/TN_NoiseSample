@@ -1,5 +1,79 @@
 # Validation Notes — Deviations from Paper
 
+## H100 Paper-Reproduction Pass, Session 2 (2026-07-12)
+
+Follow-up to the same-day "H100 Paper-Reproduction Pass" section below, via
+the OpenSpec change `finish-paper-reproduction-sweep`.
+
+### Harness fix: decoupled baseline shot count
+
+`run_benchmark()` previously passed the same `num_shots` to all three
+simulators. This was fine for non-proportional sweeps but made
+proportional-mode sweeps (where `num_shots` doubles as the paper's swept
+`mi`, up to 10,000) impossible: `TraditionalTrajectorySimulator` builds one
+GPU `NetworkState` per shot (~1-2s overhead each at n=100-200), so a
+10,000-shot request meant hours just for the baseline. Added a
+`baseline_num_shots` parameter, independent of `num_shots`, defaulting to
+`num_shots` (unchanged behavior for existing call sites) but settable small
+(e.g. 20) for proportional sweeps — since throughput is a per-shot *rate*,
+the baseline only needs enough shots to estimate that rate stably, not to
+match `mi`. Verified: a config that previously would have required ~10,000
+Traditional shots at ~1-2s each now completes in 4.2 seconds (n=20, g=50,
+mi=1000, baseline=20, measured speedup 338.9×).
+
+### Extended non-proportional grid (Fig. 3)
+
+Grid coverage went from 4/25 to **19/25** (n,g) cells — full 5/5 coverage
+for n=50 and n=100, 3/5 for n=75/150/200 (missing g=400,800 at those three
+n values). Still 1 instance per cell, not the paper's 10 — time went to
+breadth across the grid rather than per-cell statistics, per this change's
+design.md decision to prioritize breadth. All 19 cells succeeded (100%
+success rate, no timeouts).
+
+| n | g=200 | g=400 | g=600 | g=800 | g=1000 |
+|---|---|---|---|---|---|
+| 50 | 1,651,924× | 1,214,780× | 1,085,018× | 1,075,885× | 976,343× |
+| 75 | 3,766,290× | — | 4,901,439× | — | 6,731,726× |
+| 100 | 1,781,610× | 1,373,306× | 1,135,254× | 918,526× | 880,159× |
+| 150 | 1,843,772× | — | 1,048,814× | — | 797,666× |
+| 200 | 1,731,344× | — | 1,003,612× | — | 746,725× |
+
+Notable real pattern in this data: at n=75, speedup *increases* with g
+(3.8M× → 4.9M× → 6.7M×) — the clearest example yet in this project's runs
+of the paper's own reported trend (Fig. 3: speedup grows with circuit depth
+relative to qubit count, as deeper circuits populate more distinct states
+for the final batch to harvest). At n=50/100/150/200, speedup mostly
+*decreases* slightly with g in this data instead — the opposite direction.
+Both patterns are real measurements from this run, reported as-is; with
+only 1 instance per cell and no >80%/<80% success-tracking noise floor
+established yet (all cells succeeded, so noise isn't a hidden explanatory
+factor here), this divergence from the paper's monotonic trend is left
+unexplained rather than rationalized. A deeper investigation (10 instances
+per cell, to separate real trend from single-instance circuit-to-circuit
+variance) is future work.
+
+`benchmarks/figures/fig3_nonproportional_speedup.png` and
+`fig6_contraction_pathfinding.png` regenerated from the extended data.
+
+### What did NOT run this session
+
+Per explicit direction to stop after the non-proportional grid work:
+
+- **Proportional sweep (Fig. 5)**: not run. The harness fix above unblocks
+  it (previously every attempt timed out), but no sweep data was collected
+  this session.
+- **Batch-size sweep (Fig. 7)**: not run. `run_batch_size_sweep()` and a
+  ready driver script (`benchmarks/_batch_sweep.py`) exist but were never
+  executed.
+- **bf-sweep anomaly follow-up**: not run. The prior session's finding
+  (speedup decreasing with larger final_batch_size, opposite the paper's
+  direction) remains unexplained. A ready driver script
+  (`benchmarks/_bf_anomaly_check.py`) exists but was never executed.
+
+See `openspec/changes/finish-paper-reproduction-sweep/tasks.md` (archived
+under `openspec/changes/archive/` once this change closes) for the exact
+per-task status.
+
 ## H100 Paper-Reproduction Pass (2026-07-12)
 
 This section supersedes the "V100 Validation Pass" section below for the
