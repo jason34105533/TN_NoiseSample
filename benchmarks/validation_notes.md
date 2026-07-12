@@ -106,25 +106,55 @@ trend in the paper's Fig. 6. Generated:
 values × 2 g values) and
 `benchmarks/figures/fig6_contraction_pathfinding.png` (Fig. 6 analog).
 
-**What did NOT run** (cut short by the time budget, not attempted at all):
-- The remaining non-proportional grid point (n=200, g=600) was in progress
-  when the run was stopped.
-- Proportional-mode benchmarking (Fig. 5 analog) — `run_benchmark(...,
-  mode="proportional")` and the harness's `mode` plumbing are implemented
-  and unit-tested, but no real proportional sweep was executed.
-- Final-batch-size sweep (Fig. 4 analog) — not run.
-- Batch-size sweep (Fig. 7 analog) — `run_batch_size_sweep()` is implemented
-  and callable (`benchmarks/_reproduction_run.py` includes it) but the run
-  was stopped before reaching it.
-- 10-instance statistics (>80%/<80% success-rate marker convention) — every
-  config above used 1 instance, not 10; the success-rate field is
-  implemented and tested but has no multi-instance data to report here.
+**Follow-up run: final-batch-size sweep (Fig. 4 analog) — completed.**
+n=100, g=600, batch_size=10 (non-final), bf swept over {24, 26, 28}, 1
+instance, 10 shots, E=5:
 
-**To resume**: `benchmarks/_reproduction_run.py` is a self-contained,
-incrementally-checkpointing driver (writes JSON after every config) that can
-be re-run or extended; `python -m benchmarks.plots` regenerates figures from
-whatever result JSON exists. Scaling to the paper's full grid is a matter of
-GPU time, not further engineering — the contraction engine and harness are
+| bf | speedup (optimized/traditional) |
+|---|---|
+| 24 | 1,275,393× |
+| 26 | 1,094,301× |
+| 28 | 1,081,521× |
+
+This *decreases* slightly with larger bf at this small scale, which is the
+**opposite direction** from the paper's Fig. 4 (which shows throughput
+*increasing* with bf, since a larger final batch harvests more of the
+Hilbert space per contraction). Plausible explanation, not confirmed: at
+only 10 shots and a small/shallow circuit (g=600 at n=100 is comparatively
+close to the paper's grid corner where speedup hasn't saturated yet, see
+above), the larger final-batch contraction's extra cost per call isn't yet
+being amortized by proportionally more harvested bitstrings — worth
+revisiting with more shots/gates before treating this as a real trend
+reversal rather than small-sample noise. Recorded honestly rather than
+adjusted to match the paper's direction.
+`benchmarks/figures/fig4_bf_sweep.png` generated from this data.
+
+**Follow-up: proportional sweep (Fig. 5 analog) — attempted, no usable
+data.** Traditional's per-shot GPU network rebuild (~1-2s/shot at n=100-200)
+means even 100 shots exceeded a 150s per-simulator timeout at n=100/g=600;
+both attempted shot counts (100, 1000) failed as timeouts, not silently
+dropped (recorded with `success=False`, `failure_reason` populated) then
+removed from committed results since they carry no signal. A real
+proportional-Fig.5 run needs either a much larger timeout budget or fewer
+shots than felt meaningful to plot (mode plumbing itself is implemented and
+unit-tested against small circuits in `tests/test_benchmark_harness.py`).
+
+**Batch-size sweep (Fig. 7 analog) — not attempted** in the time available.
+
+**What remains genuinely unrun**: the other 21 of 25 (n,g) grid cells,
+10-instance-per-config statistics (>80%/<80% success-rate marker
+convention — every config here used 1 instance), a working proportional
+sweep, and the batch-size sweep. `openspec/changes/gpu-bounded-memory-contraction/tasks.md`
+tracks this precisely.
+
+**To resume**: `benchmarks/_reproduction_run.py`, `_reproduction_run2.py`,
+`_reproduction_run3.py` are the drivers used this session (each
+incrementally checkpoints to JSON); `python -m benchmarks.plots`
+regenerates figures from whatever result JSON exists. For a working
+proportional sweep, raise `timeout_s` substantially (Traditional dominates
+wall-clock there) or reduce shot counts further than felt useful to plot
+this session. Scaling to the paper's full grid is a matter of GPU time, not
+further engineering — the contraction engine and harness are
 paper-conformant.
 
 ## V100 Validation Pass (2026-07-05)
