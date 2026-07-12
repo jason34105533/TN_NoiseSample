@@ -31,6 +31,7 @@ class OptimizedPTSBESimulator(BaseTNSimulator):
         num_error_sets: Optional[int] = None,
         min_prob: float = 0.0,
         rng_seed: Optional[int] = None,
+        use_gpu: bool = True,
     ):
         if final_batch_size < 1:
             raise ValueError("final_batch_size must be >= 1")
@@ -42,6 +43,7 @@ class OptimizedPTSBESimulator(BaseTNSimulator):
         self.num_error_sets = num_error_sets
         self.min_prob = min_prob
         self.rng_seed = rng_seed
+        self.use_gpu = use_gpu
         self._path_find_count = 0
 
     def sample(
@@ -71,17 +73,42 @@ class OptimizedPTSBESimulator(BaseTNSimulator):
         engine = ContractionEngine(
             batch_size=self.batch_size,
             final_batch_size=self.final_batch_size,
-            use_gpu=False,
+            use_gpu=self.use_gpu,
         )
-
-        # ── UPV: find path once on the NOISELESS network ──────────────────────
-        noiseless_network = TensorNetworkBuilder.build(circuit, mode="noiseless")
-        self._path_find_count = 0
-        path = engine.find_path(noiseless_network, num_hypersamples=self.num_hypersamples)
-        self._path_find_count = 1
+        self._last_engine = engine
 
         rng = np.random.default_rng(self.rng_seed)
         results: List[Tuple[str, int]] = []
+        self._path_find_count = 0
+
+        if engine.use_gpu:
+            # ── UPV (GPU): one persistent NetworkState on the noiseless circuit,
+            # reused across all E error sets via update_tensor_operator ────────
+            handle = engine.build_gpu_network(circuit, mode="noiseless", num_hypersamples=self.num_hypersamples)
+            self._path_find_count = 1
+            try:
+                for set_idx, (error_set, shot_count) in enumerate(error_sets_with_counts):
+                    touched = engine.apply_error_set_gpu(handle, error_set)
+                    try:
+                        if mode == "non_proportional":
+                            shots = self._sample_non_proportional(
+                                engine, handle, handle, n, shot_count, rng
+                            )
+                        else:
+                            shots = self._sample_proportional(
+                                engine, handle, handle, n, shot_count, rng
+                            )
+                    finally:
+                        engine.revert_error_set_gpu(handle, touched)
+                    results.extend((bs, set_idx) for bs in shots)
+            finally:
+                handle.free()
+            return results
+
+        # ── UPV (CPU fallback): find path once on the NOISELESS network ───────
+        noiseless_network = TensorNetworkBuilder.build(circuit, mode="noiseless")
+        path = engine.find_path(noiseless_network, num_hypersamples=self.num_hypersamples)
+        self._path_find_count = 1
 
         for set_idx, (error_set, shot_count) in enumerate(error_sets_with_counts):
             # Fuse error operators into gate tensors — topology preserved, path reused

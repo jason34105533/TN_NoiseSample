@@ -22,10 +22,12 @@ class UnoptimizedPTSBESimulator(BaseTNSimulator):
         batch_size: int = 24,
         num_error_sets: Optional[int] = None,
         rng_seed: Optional[int] = None,
+        use_gpu: bool = True,
     ):
         self.batch_size = batch_size
         self.num_error_sets = num_error_sets
         self.rng_seed = rng_seed
+        self.use_gpu = use_gpu
         self._path_find_count = 0
 
     def sample(
@@ -48,13 +50,30 @@ class UnoptimizedPTSBESimulator(BaseTNSimulator):
         engine = ContractionEngine(
             batch_size=self.batch_size,
             final_batch_size=self.batch_size,
-            use_gpu=False,
+            use_gpu=self.use_gpu,
         )
+        self._last_engine = engine
         rng = np.random.default_rng(self.rng_seed)
         results: List[Tuple[str, int]] = []
         self._path_find_count = 0
 
         for set_idx, (error_set, shot_count) in enumerate(error_sets_with_counts):
+            if engine.use_gpu:
+                # Build one GPU network per error set (Fig. 1 center): errors fused
+                # in at construction, path found once (lazily, on first query),
+                # reused across this error set's shot_count shots.
+                handle = engine.build_gpu_network(
+                    circuit, error_set=error_set, mode="fuse", num_hypersamples=1
+                )
+                self._path_find_count += 1
+                try:
+                    for _ in range(shot_count):
+                        bitstring = self._sample_one_bitstring(engine, handle, handle, n, rng)
+                        results.append((bitstring, set_idx))
+                finally:
+                    handle.free()
+                continue
+
             # Build network with errors inserted (changes topology per error set)
             network = TensorNetworkBuilder.build(circuit, error_set=error_set, mode="insert")
 

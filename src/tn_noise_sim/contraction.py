@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import warnings
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -24,6 +25,14 @@ try:
 except ImportError:
     cutn = None
     HAS_CUTENSORNET = False
+
+# Optional cuQuantum NetworkState backend (real bounded-memory GPU contraction)
+try:
+    from cuquantum.tensornet.experimental import NetworkState as _NetworkState
+    HAS_NETWORK_STATE = True
+except ImportError:
+    _NetworkState = None
+    HAS_NETWORK_STATE = False
 
 # CPU einsum fallback via opt_einsum
 try:
@@ -59,6 +68,29 @@ class ContractionPathCache:
     def topology_hash(cls, network: TNNetwork) -> str:
         h = hashlib.sha256(network.topology_hash().encode()).hexdigest()
         return h
+
+    @classmethod
+    def circuit_topology_hash(cls, circuit: Dict[str, Any]) -> str:
+        """Topology hash for a circuit dict, for GPU NetworkState handle caching."""
+        parts = [str(circuit["n_qubits"])]
+        for gate in circuit["gates"]:
+            parts.append(f"{tuple(gate['qubits'])}:{gate['unitary'].shape}")
+        return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
+class GPUNetworkHandle:
+    """A persistent NetworkState plus bookkeeping needed for UPV-style reuse."""
+
+    __slots__ = ("state", "tensor_ids", "coherent_operands", "n_qubits")
+
+    def __init__(self, state, tensor_ids: Dict[int, Any], coherent_operands: Dict[int, np.ndarray], n_qubits: int):
+        self.state = state
+        self.tensor_ids = tensor_ids
+        self.coherent_operands = coherent_operands
+        self.n_qubits = n_qubits
+
+    def free(self) -> None:
+        self.state.free()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,8 +209,134 @@ class ContractionEngine:
     ):
         self.batch_size = batch_size
         self.final_batch_size = final_batch_size
-        self.use_gpu = use_gpu and HAS_CUPY
+        if use_gpu and not (HAS_CUPY and HAS_NETWORK_STATE):
+            warnings.warn(
+                "use_gpu=True was requested but cupy and/or "
+                "cuquantum.tensornet.experimental.NetworkState are not importable; "
+                "falling back to the CPU dense-statevector contraction path.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        self.use_gpu = use_gpu and HAS_CUPY and HAS_NETWORK_STATE
         self.cache = ContractionPathCache()
+        # Per-call GPU timing log: (batch_index, is_fixed_pattern_first_seen, elapsed_s).
+        # Used by the benchmarking harness to approximate the paper's Fig. 6
+        # path-finding-vs-contraction split (see design.md D3): the first
+        # compute_reduced_density_matrix() call for a given batch_index pays
+        # cuTensorNet's lazy path-finding cost; later calls for the same
+        # batch_index reuse the cached plan.
+        self.call_log: List[Tuple[int, bool, float]] = []
+        self._seen_batch_indices: set = set()
+
+    # ── GPU (NetworkState-backed) construction ─────────────────────────────
+
+    def build_gpu_network(
+        self,
+        circuit: Dict[str, Any],
+        error_set: Optional[Dict[int, np.ndarray]] = None,
+        mode: str = "fuse",
+        num_hypersamples: int = 1,
+        cache: bool = False,
+    ) -> GPUNetworkHandle:
+        """
+        Build a GPU-resident NetworkState for `circuit`.
+
+        mode="noiseless": build once, then use apply_error_set_gpu()/revert_error_set_gpu()
+        to reuse this same handle (and its cached cuTensorNet contraction plan) across many
+        error sets — this is UPV. mode="fuse": build with `error_set` already fused in, for
+        one-shot use (Traditional/Unoptimized). `cache=True` looks up/stores the handle in
+        ContractionPathCache keyed by circuit topology (only meaningful for mode="noiseless",
+        where different calls for the same circuit topology can share one handle).
+        """
+        if not HAS_NETWORK_STATE:
+            raise RuntimeError("cuquantum.tensornet.experimental.NetworkState is not available")
+
+        key = None
+        if cache:
+            key = "gpu:" + ContractionPathCache.circuit_topology_hash(circuit)
+            cached = ContractionPathCache.get(key)
+            if cached is not None:
+                return cached
+
+        from .tensor_network import TensorNetworkBuilder
+
+        state, tensor_ids, coherent_operands = TensorNetworkBuilder.build_network_state(
+            circuit,
+            error_set=error_set,
+            mode=mode,
+            num_hypersamples=num_hypersamples,
+        )
+        handle = GPUNetworkHandle(state, tensor_ids, coherent_operands, circuit["n_qubits"])
+
+        if cache and key is not None:
+            ContractionPathCache.put(key, handle)
+
+        return handle
+
+    def apply_error_set_gpu(self, handle: GPUNetworkHandle, error_set: Dict[int, np.ndarray]) -> List[int]:
+        """Fuse `error_set` into `handle` in place via update_tensor_operator (UPV)."""
+        from .tensor_network import TensorNetworkBuilder
+
+        touched: List[int] = []
+        for gate_idx, error_op in error_set.items():
+            if gate_idx not in handle.tensor_ids:
+                continue
+            coherent = handle.coherent_operands[gate_idx]
+            nq = coherent.ndim // 2
+            # Recover the original (2^nq, 2^nq) unitary matrix to re-fuse against.
+            d = 2 ** nq
+            U = coherent.reshape(d, d)
+            fused = (error_op.astype(complex) @ U).reshape(coherent.shape)
+            handle.state.update_tensor_operator(handle.tensor_ids[gate_idx], fused, unitary=False)
+            touched.append(gate_idx)
+        return touched
+
+    def revert_error_set_gpu(self, handle: GPUNetworkHandle, touched_gate_idxs: List[int]) -> None:
+        """Restore `handle`'s gates listed in `touched_gate_idxs` to their coherent values."""
+        for gate_idx in touched_gate_idxs:
+            handle.state.update_tensor_operator(
+                handle.tensor_ids[gate_idx], handle.coherent_operands[gate_idx], unitary=False
+            )
+
+    def contract_batch_gpu(
+        self,
+        handle: GPUNetworkHandle,
+        batch_index: int,
+        num_batches: int,
+        prefix: Tuple[int, ...] = (),
+    ) -> np.ndarray:
+        """GPU-backed equivalent of contract_batch(), bounded to 2**b memory."""
+        import time as _time
+
+        is_final = (batch_index == num_batches)
+        b = self.final_batch_size if is_final else self.batch_size
+
+        batch_qubit_start = (batch_index - 1) * self.batch_size
+        batch_qubits = list(range(batch_qubit_start, min(batch_qubit_start + b, handle.n_qubits)))
+
+        fixed: Dict[int, int] = {}
+        for j, marginal_idx in enumerate(prefix):
+            start = j * self.batch_size
+            qubits_j = list(range(start, start + self.batch_size))
+            bits = format(marginal_idx, f"0{len(qubits_j)}b")
+            for q, bit_ch in zip(qubits_j, bits):
+                fixed[q] = int(bit_ch)
+
+        is_first_for_pattern = batch_index not in self._seen_batch_indices
+        self._seen_batch_indices.add(batch_index)
+
+        t0 = _time.perf_counter()
+        rdm = handle.state.compute_reduced_density_matrix(
+            tuple(batch_qubits), fixed=fixed, diagonal=True
+        )
+        marginal = np.asarray(cp.asnumpy(rdm) if HAS_CUPY else rdm).real.reshape(-1)
+        elapsed = _time.perf_counter() - t0
+        self.call_log.append((batch_index, is_first_for_pattern, elapsed))
+
+        norm = marginal.sum()
+        if norm > 0:
+            marginal = marginal / norm
+        return marginal
 
     def find_path(self, network: TNNetwork, num_hypersamples: int = 1) -> Any:
         """Find (or retrieve cached) contraction path for the network."""
@@ -218,6 +376,9 @@ class ContractionEngine:
         -------
         marginal: real numpy array of shape (2**b,) summing to ≤ 1.0
         """
+        if isinstance(network, GPUNetworkHandle):
+            return self.contract_batch_gpu(network, batch_index, num_batches, prefix=prefix)
+
         is_final = (batch_index == num_batches)
         b = self.final_batch_size if is_final else self.batch_size
 

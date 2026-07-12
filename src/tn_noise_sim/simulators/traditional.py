@@ -17,9 +17,10 @@ class TraditionalTrajectorySimulator(BaseTNSimulator):
     fixed batch size (default 24), no path caching.
     """
 
-    def __init__(self, batch_size: int = 24, rng_seed: Optional[int] = None):
+    def __init__(self, batch_size: int = 24, rng_seed: Optional[int] = None, use_gpu: bool = True):
         self.batch_size = batch_size
         self.rng_seed = rng_seed
+        self.use_gpu = use_gpu
         self._path_find_count = 0  # for test verification
 
     def sample(
@@ -36,8 +37,9 @@ class TraditionalTrajectorySimulator(BaseTNSimulator):
         engine = ContractionEngine(
             batch_size=self.batch_size,
             final_batch_size=self.batch_size,
-            use_gpu=False,
+            use_gpu=self.use_gpu,
         )
+        self._last_engine = engine
         rng = np.random.default_rng(self.rng_seed)
 
         for shot_idx in range(num_shots):
@@ -45,6 +47,20 @@ class TraditionalTrajectorySimulator(BaseTNSimulator):
             sampler = ErrorSampler(noise_model, num_gates, rng_seed=int(rng.integers(0, 2**31)))
             sampler.sample(num_error_sets=1, total_shots=1, mode="non_proportional")
             error_set, _ = sampler.to_list()[0]
+
+            if engine.use_gpu:
+                # Fresh GPU network per shot (Fig. 1 left): fresh path every time,
+                # matching CUDA-Q's per-shot recomputation behavior.
+                handle = engine.build_gpu_network(
+                    circuit, error_set=error_set, mode="fuse", num_hypersamples=1
+                )
+                self._path_find_count += 1
+                try:
+                    bitstring = self._sample_one_bitstring(engine, handle, handle, n, rng)
+                finally:
+                    handle.free()
+                results.append((bitstring, shot_idx))
+                continue
 
             # Build noisy network with error operators inserted
             network = TensorNetworkBuilder.build(circuit, error_set=error_set, mode="insert")

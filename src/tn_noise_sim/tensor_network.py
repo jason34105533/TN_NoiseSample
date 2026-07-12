@@ -175,6 +175,84 @@ class TensorNetworkBuilder:
         return network
 
     @staticmethod
+    def _gate_tensor(gate: dict, error_op: Optional[np.ndarray] = None) -> np.ndarray:
+        """Reshape (and optionally fuse an error operator into) a gate's unitary.
+
+        Mirrors the reshape/fusion convention used by `build()`'s "fuse" mode:
+        single-qubit -> (2,2) = [out, in]; two-qubit -> (2,2,2,2) = [out0,out1,in0,in1].
+        """
+        U = gate["unitary"].astype(complex)
+        nq = len(gate["qubits"])
+        shape = tuple([2] * nq + [2] * nq)
+        if error_op is not None:
+            K = error_op.astype(complex)
+            return (K @ U).reshape(shape)
+        return U.reshape(shape)
+
+    @staticmethod
+    def build_network_state(
+        circuit: dict,
+        error_set: Optional[ErrorSet] = None,
+        mode: str = "fuse",
+        num_hypersamples: int = 1,
+        dtype: str = "complex128",
+    ):
+        """
+        Build a `cuquantum.tensornet.experimental.NetworkState` from a circuit dict.
+
+        Unlike `build()`, this applies each gate directly to the state via
+        `apply_tensor_operator` in circuit order (NetworkState has no explicit
+        wire-graph to construct) so the resulting contraction is bounded to
+        whatever `where`/`fixed` modes a later marginal query requests, not to
+        the full 2^n state.
+
+        Parameters
+        ----------
+        circuit: dict with keys "n_qubits" and "gates"
+        error_set: optional {gate_idx: error_matrix}; only used when mode="fuse"
+        mode: "noiseless" | "fuse"
+            - noiseless: apply only coherent gates (error_set ignored)
+            - fuse: fuse each gate_idx in error_set into its gate tensor
+        num_hypersamples: path optimizer iterations, forwarded to TNConfig
+
+        Returns
+        -------
+        (state, tensor_ids, coherent_operands)
+            state: the NetworkState
+            tensor_ids: {gate_idx: tensor_id} for every gate (for update_tensor_operator)
+            coherent_operands: {gate_idx: ndarray} the error-free tensor for each gate
+                (needed to revert a gate updated via apply_error_set_gpu)
+        """
+        from cuquantum.tensornet.experimental import NetworkState, TNConfig
+
+        n = circuit["n_qubits"]
+        gates = circuit["gates"]
+
+        config = TNConfig(num_hyper_samples=num_hypersamples)
+        state = NetworkState(tuple([2] * n), dtype=dtype, config=config)
+
+        tensor_ids: Dict[int, int] = {}
+        coherent_operands: Dict[int, np.ndarray] = {}
+
+        for gate_idx, gate in enumerate(gates):
+            coherent_tensor = TensorNetworkBuilder._gate_tensor(gate)
+            coherent_operands[gate_idx] = coherent_tensor
+
+            error_op = None
+            if mode == "fuse" and error_set and gate_idx in error_set:
+                error_op = error_set[gate_idx]
+
+            gate_tensor = (
+                TensorNetworkBuilder._gate_tensor(gate, error_op)
+                if error_op is not None
+                else coherent_tensor
+            )
+            tid = state.apply_tensor_operator(gate["qubits"], gate_tensor, unitary=False)
+            tensor_ids[gate_idx] = tid
+
+        return state, tensor_ids, coherent_operands
+
+    @staticmethod
     def from_qiskit_circuit(
         qc,
         error_set: Optional[ErrorSet] = None,

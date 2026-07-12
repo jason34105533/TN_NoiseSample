@@ -2,7 +2,16 @@
 import numpy as np
 import pytest
 from tn_noise_sim.tensor_network import TensorNetworkBuilder
-from tn_noise_sim.contraction import ContractionEngine, ContractionPathCache
+from tn_noise_sim.contraction import (
+    ContractionEngine,
+    ContractionPathCache,
+    HAS_CUPY,
+    HAS_NETWORK_STATE,
+)
+
+requires_gpu = pytest.mark.skipif(
+    not (HAS_CUPY and HAS_NETWORK_STATE), reason="requires cupy + cuquantum.tensornet.experimental"
+)
 
 
 def _h_gate() -> np.ndarray:
@@ -154,3 +163,151 @@ def test_num_batches_calculation():
     network = TensorNetworkBuilder.build(circuit)
     engine = ContractionEngine(batch_size=2, final_batch_size=2, use_gpu=False)
     assert engine._num_batches(network) == 2
+
+
+# ── GPU-backed (NetworkState) bounded-memory contraction ───────────────────────
+
+def _entangled_circuit_with_errors(n: int = 5, g: int = 10, seed: int = 0):
+    """A small circuit with single- and two-qubit gates plus a fused error_set,
+    small enough that the CPU dense-statevector path can also compute it, so
+    GPU results can be checked against it directly."""
+    rng = np.random.default_rng(seed)
+    gates = []
+    error_set = {}
+    for gate_idx in range(g):
+        if n >= 2 and rng.random() < 0.4:
+            q0 = int(rng.integers(0, n - 1))
+            z = rng.standard_normal((4, 4)) + 1j * rng.standard_normal((4, 4))
+            u, _ = np.linalg.qr(z)
+            gates.append({"qubits": (q0, q0 + 1), "unitary": u})
+        else:
+            q = int(rng.integers(0, n))
+            z = rng.standard_normal((2, 2)) + 1j * rng.standard_normal((2, 2))
+            u, _ = np.linalg.qr(z)
+            gates.append({"qubits": (q,), "unitary": u})
+        if rng.random() < 0.5:
+            nq = len(gates[-1]["qubits"])
+            d = 2 ** nq
+            z = rng.standard_normal((d, d)) + 1j * rng.standard_normal((d, d))
+            k, _ = np.linalg.qr(z)
+            error_set[gate_idx] = k
+    return {"n_qubits": n, "gates": gates}, error_set
+
+
+def _random_error_set_for_circuit(circuit: dict, seed: int, prob: float = 0.5):
+    """Sample a fused error_set sized to match `circuit`'s own gate arities."""
+    rng = np.random.default_rng(seed)
+    error_set = {}
+    for gate_idx, gate in enumerate(circuit["gates"]):
+        if rng.random() < prob:
+            nq = len(gate["qubits"])
+            d = 2 ** nq
+            z = rng.standard_normal((d, d)) + 1j * rng.standard_normal((d, d))
+            k, _ = np.linalg.qr(z)
+            error_set[gate_idx] = k
+    return error_set
+
+
+@requires_gpu
+def test_gpu_matches_cpu_unconditioned_marginal():
+    n, b = 5, 3
+    circuit, error_set = _entangled_circuit_with_errors(n=n, g=10, seed=1)
+
+    cpu_engine = ContractionEngine(batch_size=b, final_batch_size=n - b, use_gpu=False)
+    cpu_network = TensorNetworkBuilder.build(circuit, error_set=error_set, mode="fuse")
+    cpu_path = cpu_engine.find_path(cpu_network)
+    cpu_marginal = cpu_engine.contract_batch(cpu_network, cpu_path, batch_index=1, num_batches=2)
+
+    gpu_engine = ContractionEngine(batch_size=b, final_batch_size=n - b, use_gpu=True)
+    handle = gpu_engine.build_gpu_network(circuit, error_set=error_set, mode="fuse", num_hypersamples=1)
+    try:
+        gpu_marginal = gpu_engine.contract_batch(handle, handle, batch_index=1, num_batches=2)
+    finally:
+        handle.free()
+
+    np.testing.assert_allclose(gpu_marginal, cpu_marginal, atol=1e-6)
+
+
+@requires_gpu
+def test_gpu_matches_cpu_conditioned_marginal():
+    n, b = 5, 3
+    circuit, error_set = _entangled_circuit_with_errors(n=n, g=10, seed=2)
+    prefix = (1,)  # arbitrary fixed prefix value for batch 1 (b=3 qubits -> idx in [0,8))
+
+    cpu_engine = ContractionEngine(batch_size=b, final_batch_size=n - b, use_gpu=False)
+    cpu_network = TensorNetworkBuilder.build(circuit, error_set=error_set, mode="fuse")
+    cpu_path = cpu_engine.find_path(cpu_network)
+    cpu_marginal = cpu_engine.contract_batch(
+        cpu_network, cpu_path, batch_index=2, num_batches=2, prefix=prefix
+    )
+
+    gpu_engine = ContractionEngine(batch_size=b, final_batch_size=n - b, use_gpu=True)
+    handle = gpu_engine.build_gpu_network(circuit, error_set=error_set, mode="fuse", num_hypersamples=1)
+    try:
+        gpu_marginal = gpu_engine.contract_batch(
+            handle, handle, batch_index=2, num_batches=2, prefix=prefix
+        )
+    finally:
+        handle.free()
+
+    np.testing.assert_allclose(gpu_marginal, cpu_marginal, atol=1e-6)
+
+
+@requires_gpu
+def test_gpu_upv_update_matches_fresh_build():
+    """UPV: applying an error set via update_tensor_operator on a persistent
+    NetworkState must match building a fresh fused NetworkState directly."""
+    n, b = 5, 3
+    circuit, error_set_a = _entangled_circuit_with_errors(n=n, g=10, seed=3)
+    error_set_b = _random_error_set_for_circuit(circuit, seed=4)
+
+    engine = ContractionEngine(batch_size=b, final_batch_size=n - b, use_gpu=True)
+
+    noiseless_handle = engine.build_gpu_network(circuit, mode="noiseless", num_hypersamples=1)
+    try:
+        touched_a = engine.apply_error_set_gpu(noiseless_handle, error_set_a)
+        marginal_a_via_update = engine.contract_batch(
+            noiseless_handle, noiseless_handle, batch_index=1, num_batches=2
+        )
+        engine.revert_error_set_gpu(noiseless_handle, touched_a)
+
+        touched_b = engine.apply_error_set_gpu(noiseless_handle, error_set_b)
+        marginal_b_via_update = engine.contract_batch(
+            noiseless_handle, noiseless_handle, batch_index=1, num_batches=2
+        )
+        engine.revert_error_set_gpu(noiseless_handle, touched_b)
+    finally:
+        noiseless_handle.free()
+
+    fresh_a = engine.build_gpu_network(circuit, error_set=error_set_a, mode="fuse", num_hypersamples=1)
+    try:
+        marginal_a_fresh = engine.contract_batch(fresh_a, fresh_a, batch_index=1, num_batches=2)
+    finally:
+        fresh_a.free()
+
+    fresh_b = engine.build_gpu_network(circuit, error_set=error_set_b, mode="fuse", num_hypersamples=1)
+    try:
+        marginal_b_fresh = engine.contract_batch(fresh_b, fresh_b, batch_index=1, num_batches=2)
+    finally:
+        fresh_b.free()
+
+    np.testing.assert_allclose(marginal_a_via_update, marginal_a_fresh, atol=1e-6)
+    np.testing.assert_allclose(marginal_b_via_update, marginal_b_fresh, atol=1e-6)
+
+
+@requires_gpu
+def test_gpu_bounded_memory_beyond_cpu_feasible_scale():
+    """n=40 has no physical 2^40-entry dense array; the GPU path must still
+    complete a bounded (2^b) batch contraction without attempting one."""
+    n, b = 40, 10
+    circuit, error_set = _entangled_circuit_with_errors(n=n, g=30, seed=5)
+
+    engine = ContractionEngine(batch_size=b, final_batch_size=b, use_gpu=True)
+    handle = engine.build_gpu_network(circuit, error_set=error_set, mode="fuse", num_hypersamples=1)
+    try:
+        marginal = engine.contract_batch(handle, handle, batch_index=1, num_batches=engine._num_batches(handle))
+    finally:
+        handle.free()
+
+    assert marginal.shape == (2 ** b,)
+    assert abs(marginal.sum() - 1.0) < 1e-4
