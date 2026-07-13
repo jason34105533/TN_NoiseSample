@@ -172,7 +172,7 @@ def run_benchmark(
         record: Dict[str, Any] = {
             "n": n, "g": g, "instance_id": inst_id, "mode": mode, "success": True,
             "num_shots_requested": num_shots, "baseline_num_shots": baseline_shots,
-            "final_batch_size": final_batch_size,
+            "final_batch_size": final_batch_size, "num_error_sets": num_error_sets,
             "gpu_device_name": gpu_info["gpu_device_name"] if gpu_info else None,
             "gpu_memory_total_bytes": gpu_info["gpu_memory_total_bytes"] if gpu_info else None,
         }

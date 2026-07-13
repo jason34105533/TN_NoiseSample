@@ -34,6 +34,16 @@ def test_run_benchmark_record_has_gpu_fields_when_no_gpu():
     assert results[0]["gpu_memory_total_bytes"] is None
 
 
+def test_run_benchmark_record_has_num_error_sets():
+    from benchmarks.run_benchmark import run_benchmark
+
+    results = run_benchmark(
+        n=3, g=3, num_instances=1, num_shots=2, num_error_sets=7,
+        batch_size=2, final_batch_size=3, fast=True, use_gpu=False,
+    )
+    assert results[0]["num_error_sets"] == 7
+
+
 # ── Circuit generator: paper-exact gate set (Sec. IV-B) ─────────────────────
 
 def test_generate_circuit_gate_set_matches_paper():

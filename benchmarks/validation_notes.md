@@ -1,5 +1,79 @@
 # Validation Notes — Deviations from Paper
 
+## H100 Paper-Reproduction Pass, Session 4 (2026-07-12)
+
+Follow-up via the OpenSpec change `complete-remaining-figures-and-sweeps`, continuing from Session 3 below.
+
+### Harness: num_error_sets now recorded
+
+`run_benchmark()`'s JSON output now includes `num_error_sets`, closing a
+gap found while diagnosing Session 3's n=200,g=1000 failures (the actual
+root cause — too few baseline shots per pre-sampled error set for
+Unoptimized PTSBE to amortize path-finding — wasn't visible from the JSON
+alone without cross-referencing the calling script).
+
+### Batch-size sweep (Fig. 7) — first real data
+
+n=100,g=600, non-final and final batch both set to `bj`, 1 instance, 10
+shots, E=5:
+
+| bj | per-batch time |
+|---|---|
+| 2 | 0.39s |
+| 5 | 0.40s |
+| 10 | 0.40s |
+| 15 | 0.42s |
+| 20 | 0.41s |
+| 24 | 0.54s |
+| 28 | timed out (200s budget) |
+
+Cost rises with batch size, matching the paper's qualitative direction
+(Fig. 7: smaller batches are cheaper per contraction). bj=28 (both
+non-final and final batches at the largest tested size) didn't complete in
+the 200s budget — a real, reportable data point on its own, not a bug.
+`benchmarks/figures/fig7_batch_size_sweep.png` generated.
+
+### Proportional sweep (Fig. 5) — now much more complete
+
+n=100,g=600 now has a **complete 4/4-point dataset**:
+
+| mi | speedup |
+|---|---|
+| 10 | 1.2× |
+| 100 | 5.6× |
+| 1,000 | 29.7× |
+| 10,000 | 59.5× |
+
+(The mi=10000 point failed in Session 3 at a 500s budget; retried here at
+800s and succeeded.)
+
+n=200,g=1000 gained 2 more points (now 3/4, using `num_error_sets=5` per
+Session 3's amortization fix):
+
+| mi | speedup |
+|---|---|
+| 10 | 1.5× |
+| 100 | 11.9× |
+| 1,000 | 36.8× |
+| 10,000 | not collected (in progress when session ended) |
+
+Both configs show a clean, monotonically increasing speedup with mi across
+every point collected — consistent with the paper's own mechanism (PTSBE's
+per-error-set overhead amortizing over more shots). Still below the
+paper's ~1000× claim at the mi values reached; the trend suggests it would
+continue climbing at higher mi, but that's not been confirmed since neither
+config has reached the paper's largest tested shot counts (and n=200,g=1000
+still lacks its mi=10000 point). `benchmarks/figures/fig5_proportional_speedup.png`
+regenerated with all 7 real points now available (up from 4 in Session 3).
+
+### What did NOT run this session
+
+- **bf-sweep anomaly re-check**: not run — session ended before reaching
+  it. Driver script (`benchmarks/_bf_anomaly_check.py`) remains verified
+  and ready. Session 2's finding (speedup decreasing with larger
+  final_batch_size, opposite the paper's direction) remains unexplained.
+- **n=200,g=1000, mi=10000**: not collected (killed mid-run).
+
 ## H100 Paper-Reproduction Pass, Session 3 (2026-07-12)
 
 Follow-up via the OpenSpec change `run-remaining-reproduction-figures`, continuing from Session 2 below.
