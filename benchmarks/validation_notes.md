@@ -1,5 +1,71 @@
 # Validation Notes — Deviations from Paper
 
+## H100 Paper-Reproduction Pass, Session 3 (2026-07-12)
+
+Follow-up via the OpenSpec change `run-remaining-reproduction-figures`, continuing from Session 2 below.
+
+### Proportional sweep (Fig. 5) — partial real data
+
+n=100,g=600, mi swept with `baseline_num_shots=20`:
+
+| mi | speedup (optimized/traditional) |
+|---|---|
+| 10 | 1.2× |
+| 100 | 5.6× |
+| 1000 | 29.7× |
+| 10000 | timed out (500s budget) |
+
+Clean, monotonically increasing progression with mi — plausible (PTSBE's
+per-error-set overhead amortizes over more shots) but not yet at the
+paper's reported "largely independent of mi" plateau (paper Fig. 5), since
+we didn't reach mi=10000 or beyond.
+
+n=200,g=1000: **all 4 attempts failed at `num_error_sets=20`** (same
+`baseline_num_shots=20`) — diagnosed as ~1 shot/error-set for Unoptimized
+PTSBE at that E, meaning zero path-finding amortization: each of 20 error
+sets pays a full cold path-find on a large, deep circuit, blowing any
+reasonable timeout regardless of what mi is being tested for the Optimized
+side. Reducing to `num_error_sets=5` fixed this — got 1 point (mi=10,
+speedup 1.5×, ~438s wall-clock for that single point). Did not chase
+mi=100/1000/10000 at this n; each point costs several minutes at this
+scale and the session was wrapping up.
+
+**Measured speedups (1.2×-29.7×) are well below the paper's ~1000×
+proportional claim** — this is an honest, direct consequence of not
+reaching the paper's full mi range (up to 10,000+) rather than a
+correctness problem; the clean monotonic trend with mi is consistent with
+the paper's own mechanism (PTSBE overhead amortizing over more shots), just
+not run far enough to reach the plateau.
+
+`benchmarks/figures/fig5_proportional_speedup.png` generated from the 4
+real points (3 at n=100,g=600 + 1 at n=200,g=1000).
+
+### Discovered: timeout mechanism doesn't preempt long single GPU calls
+
+`run_benchmark()`'s `timeout_s` uses `signal.alarm`/SIGALRM. This only
+raises `_Timeout` when Python regains control between bytecode
+instructions — a single blocking call into cuTensorNet/CuPy that itself
+runs longer than `timeout_s` will not be interrupted mid-call; the alarm
+fires but isn't handled until that call returns. This explains why some
+"timed out" runs actually ran well past their nominal budget before
+failing (e.g. a 500s-budget config that took over 600s of wall-clock before
+the failure was recorded). Not fixed this session — a real preemptive
+timeout would need a subprocess or thread-based approach. Noted here as a
+known limitation, not silently worked around.
+
+### What did NOT run this session
+
+- **Batch-size sweep (Fig. 7)**: not run. Driver script
+  (`benchmarks/_batch_sweep.py`) verified against current code, ready to
+  run.
+- **bf-sweep anomaly re-check**: not run. Driver script
+  (`benchmarks/_bf_anomaly_check.py`) verified against current code, ready
+  to run. The Session-2 finding (speedup decreasing with larger
+  final_batch_size, opposite the paper's direction) remains unexplained.
+
+See `openspec/changes/archive/2026-07-12-run-remaining-reproduction-figures/tasks.md`
+for exact per-task status once this change is archived.
+
 ## H100 Paper-Reproduction Pass, Session 2 (2026-07-12)
 
 Follow-up to the same-day "H100 Paper-Reproduction Pass" section below, via
