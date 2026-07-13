@@ -1,5 +1,65 @@
 # Validation Notes — Deviations from Paper
 
+## H100 Paper-Reproduction Pass, Session 5 (2026-07-12)
+
+Follow-up via the OpenSpec change `correct-fig4-and-finish-fig5`, prompted
+by a deliberate re-read of the paper's spec-relevant sections (Sec. V-A)
+before continuing, per explicit request. That re-read found a real
+mistake in both prior bf-sweep attempts: **the paper's Fig. 4 is run at
+n=200** ("demonstrated for n = 200 systems," Sec. V-A), not n=100, which
+every previous session used.
+
+### Fig. 5: one point remains genuinely unreachable so far
+
+Retried n=200,g=1000,mi=10000 (`num_error_sets=5`, `baseline_num_shots=10`)
+with a 900s budget — **failed**, running to ~1213s wall-clock before the
+timeout was recorded (consistent with the known SIGALRM-preemption
+limitation: the budget doesn't interrupt a call already in progress, only
+fires once Python regains control). This specific point (mi=10000 at
+n=200, proportional mode) looks like a genuine scaling wall at the current
+`num_error_sets`/timeout settings, not simply a matter of retrying with a
+bigger number — not pursued further this session. Fig. 5's dataset stands
+at 4/4 points for n=100,g=600 and 3/4 for n=200,g=1000 (missing only
+mi=10000).
+
+### Fig. 4, corrected: run at n=200, not n=100
+
+7 of 9 planned points (g∈{200,600,1000} × bf∈{24,26,28} at n=200, all 3 bf
+values for g=200/600, only bf=24 for g=1000) completed — all succeeded:
+
+| g | bf=24 (throughput) | bf=26 | bf=28 |
+|---|---|---|---|
+| 200 | 251,602 | 253,996 | 253,514 |
+| 600 | 105,669 | 106,240 | 106,249 |
+| 1000 | 60,273 | — | — |
+
+**Real finding**: at the paper's own tested n=200, raw PTSBE throughput
+(the actual Fig. 4 y-axis) is **essentially flat across bf=24/26/28** —
+differences are ~1%, well within plausible single-instance noise, not the
+paper's claimed "roughly a data collection speedup factor of 2-4× each"
+per step. This is a *distinct* finding from the earlier n=100 "anomaly":
+that one was measured via the speedup *ratio* (optimized/traditional) and
+showed a clearer decreasing pattern; this one uses raw throughput (the
+correct Fig. 4 metric) at the paper's actual n, and shows essentially no
+bf-dependence at all rather than a directional reversal. Neither result is
+being folded into the other — they're different experiments testing
+different things, and both are reported as measured, not adjusted.
+`benchmarks/figures/fig4_bf_sweep_n200.png` generated from this data
+(distinct from the earlier, no-longer-paper-representative
+`fig4_bf_sweep.png`, which used n=100 and remains in place as that earlier,
+mis-scoped result — not deleted, since it's still real data, just not a
+Fig. 4 reproduction).
+
+### What did NOT run this session
+
+- **g=1000, bf=26/28 at n=200**: not collected (killed mid-run when the
+  session wrapped up).
+- **n=200,g=1000,mi=10000 (Fig. 5)**: failed as noted above; not retried
+  further.
+- The SIGALRM timeout-preemption limitation itself remains unfixed —
+  flagged again here since it directly affected both failures this
+  session.
+
 ## H100 Paper-Reproduction Pass, Session 4 (2026-07-12)
 
 Follow-up via the OpenSpec change `complete-remaining-figures-and-sweeps`, continuing from Session 3 below.
